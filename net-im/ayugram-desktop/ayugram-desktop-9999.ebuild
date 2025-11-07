@@ -3,9 +3,9 @@
 
 EAPI=8
 
-PYTHON_COMPAT=( python3_{11..13} )
+PYTHON_COMPAT=( python3_{11..14} )
 
-inherit xdg cmake python-any-r1 optfeature flag-o-matic
+inherit xdg cmake python-any-r1 optfeature toolchain-funcs flag-o-matic
 
 DESCRIPTION="Desktop Telegram client with good customization and Ghost mode"
 HOMEPAGE="https://t.me/ayugram https://github.com/AyuGram/AyuGramDesktop"
@@ -16,7 +16,7 @@ inherit git-r3
 
 LICENSE="BSD GPL-3-with-openssl-exception LGPL-2+"
 SLOT="0"
-KEYWORDS="~amd64"
+KEYWORDS="~amd64 ~loong"
 IUSE="dbus enchant +fonts +libdispatch screencast wayland webkit +X"
 
 CDEPEND="
@@ -39,9 +39,9 @@ CDEPEND="
 	media-libs/opus
 	media-libs/rnnoise
 	>=media-libs/tg_owt-0_pre20241202:=[screencast=,X=]
-	>=media-video/ffmpeg-4:=[opus,vpx]
+	>=media-video/ffmpeg-6:=[opus,vpx]
 	net-libs/tdlib:=[tde2e]
-	sys-libs/zlib:=[minizip]
+	virtual/minizip:=
 	kde-frameworks/kcoreaddons:6
 	!enchant? ( >=app-text/hunspell-1.7:= )
 	enchant? ( app-text/enchant:= )
@@ -69,7 +69,7 @@ BDEPEND="
 	${PYTHON_DEPS}
 	>=dev-build/cmake-3.16
 	>=dev-cpp/cppgir-2.0_p20240315
-	dev-libs/gobject-introspection
+	>=dev-libs/gobject-introspection-1.82.0-r2
 	dev-util/gdbus-codegen
 	virtual/pkgconfig
 	wayland? ( dev-util/wayland-scanner )
@@ -81,16 +81,25 @@ PATCHES=(
 	"${FILESDIR}"/tdesktop-5.2.2-libdispatch.patch
 	"${FILESDIR}"/tdesktop-5.7.2-cstring.patch
 	"${FILESDIR}"/tdesktop-5.8.3-cstdint.patch
-	"${FILESDIR}"/tdesktop-5.12.3-fix-webview.patch
 	"${FILESDIR}"/tdesktop-5.14.3-system-cppgir.patch
 )
 
 pkg_pretend() {
-	if has ccache ${FEATURES}; then
-		ewarn "ccache does not work with ${PN} out of the box"
-		ewarn "due to usage of precompiled headers"
-		ewarn "check bug https://bugs.gentoo.org/715114 for more info"
-		ewarn
+	if [[ ${MERGE_TYPE} != binary ]]; then
+		if has ccache ${FEATURES}; then
+			ewarn "ccache does not work with ${PN} out of the box"
+			ewarn "due to usage of precompiled headers"
+			ewarn "check bug https://bugs.gentoo.org/715114 for more info"
+			ewarn
+		fi
+		if tc-is-clang && [[ $(tc-get-cxx-stdlib) = libstdc++ ]]; then
+			ewarn "this package frequently fails to compile with clang"
+			ewarn "in combination with libstdc++."
+			ewarn "please use libc++, or build this package with gcc."
+			ewarn "(if you have a patch or a fix, please open a"
+			ewarn "bug report about it)"
+			ewarn
+		fi
 	fi
 }
 
@@ -132,7 +141,7 @@ src_configure() {
 	# XDG_DATA_DIRS variable causes all sorts of weirdness with cppgir:
 	# - bug 909038: can't read from flatpak directories (fixed upstream)
 	# - bug 920819: system-wide directories ignored when variable is set
-	export XDG_DATA_DIRS="${EPREFIX}/usr/share"
+	export XDG_DATA_DIRS="${ESYSROOT}/usr/share"
 
 	# Evil flag (bug #919201)
 	filter-flags -fno-delete-null-pointer-checks
@@ -145,6 +154,7 @@ src_configure() {
 	# https://github.com/telegramdesktop/tdesktop/issues/17437#issuecomment-1001160398
 	use !libdispatch && append-cppflags -DCRL_FORCE_QT
 
+	local no_webkit_wayland=$(use webkit && use wayland && echo no || echo yes)
 	local use_webkit_wayland=$(use webkit && use wayland && echo yes || echo no)
 	local mycmakeargs=(
 		-DQT_VERSION_MAJOR=6
@@ -156,9 +166,17 @@ src_configure() {
 		# Control automagic dependencies on certain packages
 		## These libraries are only used in lib_webview, for wayland
 		## See Telegram/lib_webview/webview/platform/linux/webview_linux_compositor.h
-		-DCMAKE_DISABLE_FIND_PACKAGE_Qt6Quick=${use_webkit_wayland}
-		-DCMAKE_DISABLE_FIND_PACKAGE_Qt6QuickWidgets=${use_webkit_wayland}
-		-DCMAKE_DISABLE_FIND_PACKAGE_Qt6WaylandCompositor=${use_webkit_wayland}
+		-DCMAKE_DISABLE_FIND_PACKAGE_Qt6Quick=${no_webkit_wayland}
+		-DCMAKE_DISABLE_FIND_PACKAGE_Qt6QuickWidgets=${no_webkit_wayland}
+		-DCMAKE_DISABLE_FIND_PACKAGE_Qt6WaylandCompositor=${no_webkit_wayland}
+
+		# Make sure dependencies that aren't patched to be REQUIRED in
+		# src_prepare, are found.  This was suggested to me by the telegram
+		# devs, in lieu of having explicit flags in the build system.
+		-DCMAKE_REQUIRE_FIND_PACKAGE_Qt6DBus=$(usex dbus)
+		-DCMAKE_REQUIRE_FIND_PACKAGE_Qt6Quick=${use_webkit_wayland}
+		-DCMAKE_REQUIRE_FIND_PACKAGE_Qt6QuickWidgets=${use_webkit_wayland}
+		-DCMAKE_REQUIRE_FIND_PACKAGE_Qt6WaylandCompositor=${use_webkit_wayland}
 
 		-DDESKTOP_APP_DISABLE_QT_PLUGINS=ON
 		-DDESKTOP_APP_DISABLE_X11_INTEGRATION=$(usex !X)
@@ -194,6 +212,13 @@ src_configure() {
 	fi
 
 	cmake_src_configure
+}
+
+src_compile() {
+	# There's a bug where sometimes, it will rebuild/relink during src_install
+	# Make sure that happens here, instead.
+	cmake_build
+	cmake_build
 }
 
 pkg_postinst() {
